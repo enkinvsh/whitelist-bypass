@@ -16,7 +16,6 @@ import (
 	"whitelist-bypass/relay/common"
 )
 
-
 const vkConfigCacheKey = "vk_config"
 
 func loadCachedConfig(cache CacheStore) *vkConfig {
@@ -60,11 +59,15 @@ func RunVKAuth(joinLink string, displayName string, logFn func(string, ...any), 
 	if resolveFn != nil {
 		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			host, port, _ := net.SplitHostPort(addr)
-			resolvedIP, err := resolveFn(host)
-			if err != nil {
-				return nil, err
+			// Skip DNS resolution for IP addresses (including 127.0.0.1)
+			if net.ParseIP(host) == nil {
+				resolvedIP, err := resolveFn(host)
+				if err != nil {
+					return nil, err
+				}
+				host = resolvedIP
 			}
-			return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, resolvedIP+":"+port)
+			return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, host+":"+port)
 		}
 	}
 	client := &http.Client{Timeout: 60 * time.Second, Transport: transport}
@@ -226,15 +229,15 @@ func RunVKAuth(joinLink string, displayName string, logFn func(string, ...any), 
 					captchaAttempt = "1"
 				}
 				callParams = url.Values{
-					"v":               {cfg.ApiVersion},
-					"vk_join_link":    {joinLink},
-					"name":            {displayName},
-					"captcha_key":     {""},
-					"captcha_sid":     {captchaErr.captchaSid},
+					"v":                {cfg.ApiVersion},
+					"vk_join_link":     {joinLink},
+					"name":             {displayName},
+					"captcha_key":      {""},
+					"captcha_sid":      {captchaErr.captchaSid},
 					"is_sound_captcha": {"0"},
-					"success_token":   {successToken},
-					"captcha_ts":      {captchaErr.captchaTs},
-					"captcha_attempt": {captchaAttempt},
+					"success_token":    {successToken},
+					"captcha_ts":       {captchaErr.captchaTs},
+					"captcha_attempt":  {captchaAttempt},
 				}
 				continue
 			}

@@ -51,11 +51,15 @@ func StartCaptchaProxy(redirectURI string, resolveFn ResolveFunc) int {
 	if resolveFn != nil {
 		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			host, port, _ := net.SplitHostPort(addr)
-			resolvedIP, err := resolveFn(host)
-			if err != nil {
-				return nil, err
+			// Skip DNS resolution for IP addresses (including 127.0.0.1)
+			if net.ParseIP(host) == nil {
+				resolvedIP, err := resolveFn(host)
+				if err != nil {
+					return nil, err
+				}
+				host = resolvedIP
 			}
-			return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, resolvedIP+":"+port)
+			return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, host+":"+port)
 		}
 	}
 
