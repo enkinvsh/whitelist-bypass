@@ -24,7 +24,10 @@ var activeCaptchaProxy struct {
 	doneCh   chan struct{}
 }
 
-func StartCaptchaProxy(redirectURI string, resolveFn ResolveFunc) int {
+func StartCaptchaProxy(redirectURI string, resolveFn ResolveFunc, logFn func(string, ...any)) int {
+	if logFn == nil {
+		logFn = func(string, ...any) {}
+	}
 	StopCaptchaProxy()
 
 	targetURL, err := url.Parse(redirectURI)
@@ -55,9 +58,13 @@ func StartCaptchaProxy(redirectURI string, resolveFn ResolveFunc) int {
 			if net.ParseIP(host) == nil {
 				resolvedIP, err := resolveFn(host)
 				if err != nil {
+					logFn("captcha-proxy: dial resolve %s failed: %v", host, err)
 					return nil, err
 				}
+				logFn("captcha-proxy: dial %s -> %s:%s", host, resolvedIP, port)
 				host = resolvedIP
+			} else {
+				logFn("captcha-proxy: dial IP %s:%s", host, port)
 			}
 			return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, host+":"+port)
 		}
@@ -138,6 +145,10 @@ func StartCaptchaProxy(redirectURI string, resolveFn ResolveFunc) int {
 			res.Header.Set("Content-Length", fmt.Sprint(len(bodyBytes)))
 			return nil
 		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			logFn("captcha-proxy: main proxy error [%s %s]: %v", r.Method, r.URL.String(), err)
+			http.Error(w, "proxy error", http.StatusBadGateway)
+		},
 	}
 
 	mux := http.NewServeMux()
@@ -154,6 +165,7 @@ func StartCaptchaProxy(redirectURI string, resolveFn ResolveFunc) int {
 	})
 	mux.HandleFunc("/generic_proxy", func(w http.ResponseWriter, r *http.Request) {
 		proxyURL := r.URL.Query().Get("proxy_url")
+		logFn("captcha-proxy: generic_proxy request -> %s", proxyURL)
 		parsed, err := url.Parse(proxyURL)
 		if err != nil || parsed.Host == "" {
 			http.Error(w, "Bad URL", http.StatusBadRequest)
@@ -168,6 +180,10 @@ func StartCaptchaProxy(redirectURI string, resolveFn ResolveFunc) int {
 				req.Out.URL.RawQuery = parsed.RawQuery
 				req.Out.Host = parsed.Host
 				req.Out.Header.Del("Accept-Encoding")
+			},
+			ErrorHandler: func(w http.ResponseWriter, rReq *http.Request, err error) {
+				logFn("captcha-proxy: generic_proxy error [%s]: %v", proxyURL, err)
+				http.Error(w, "proxy error", http.StatusBadGateway)
 			},
 		}
 		genericProxy.ServeHTTP(w, r)
