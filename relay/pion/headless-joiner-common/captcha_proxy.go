@@ -171,6 +171,13 @@ func StartCaptchaProxy(redirectURI string, resolveFn ResolveFunc, logFn func(str
 			http.Error(w, "Bad URL", http.StatusBadRequest)
 			return
 		}
+
+		// Fix: VK returns https://127.0.0.1:PORT/... but our local server is HTTP-only
+		if strings.HasPrefix(parsed.Host, "127.0.0.1") && parsed.Scheme == "https" {
+			parsed.Scheme = "http"
+			logFn("captcha-proxy: downgrading localhost URL to HTTP: %s", parsed.String())
+		}
+
 		genericProxy := &httputil.ReverseProxy{
 			Transport: transport,
 			Rewrite: func(req *httputil.ProxyRequest) {
