@@ -45,11 +45,11 @@ type VKJoinResponse struct {
 type VKHeadlessJoiner struct {
 	logFn       func(string, ...any)
 	OnConnected func(tunnel.DataTunnel)
-	ResolveFn      ResolveFunc
-	Status         StatusEmitter
-	PCConfig       PeerConnectionConfigurer
-	AddTracks      AddTunnelTracksFunc
-	ReadTrackFn    ReadTrackFunc
+	ResolveFn   ResolveFunc
+	Status      StatusEmitter
+	PCConfig    PeerConnectionConfigurer
+	AddTracks   AddTunnelTracksFunc
+	ReadTrackFn ReadTrackFunc
 
 	authParams   *VKHeadlessAuthParams
 	joinResp     *VKJoinResponse
@@ -64,6 +64,8 @@ type VKHeadlessJoiner struct {
 	vp8tunnel   *tunnel.VP8DataTunnel
 	remoteSet   bool
 	pendingICE  []webrtc.ICECandidateInit
+
+	watchdogStop chan struct{}
 }
 
 func NewVKHeadlessJoiner(logFn func(string, ...any), resolveFn ResolveFunc, status StatusEmitter, pcConfig PeerConnectionConfigurer, addTracks AddTunnelTracksFunc, readTrackFn ReadTrackFunc) *VKHeadlessJoiner {
@@ -458,6 +460,7 @@ func (h *VKHeadlessJoiner) initPC() {
 			h.Status.EmitStatus(common.StatusTunnelConnected)
 			h.vp8tunnel = tunnel.NewVP8DataTunnel(h.sampleTrack, h.logFn)
 			h.vp8tunnel.Start(25)
+			h.startDataWatchdog()
 			if h.OnConnected != nil {
 				h.OnConnected(h.vp8tunnel)
 			}
@@ -543,4 +546,38 @@ func (h *VKHeadlessJoiner) onTransmittedData(data map[string]interface{}) {
 			h.vkMu.Unlock()
 		}
 	}
+}
+
+const dataWatchdogTimeout = 30 * time.Second
+
+func (h *VKHeadlessJoiner) startDataWatchdog() {
+	if h.watchdogStop != nil {
+		return
+	}
+	h.watchdogStop = make(chan struct{})
+	h.vp8tunnel.TouchRecv()
+
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-h.watchdogStop:
+				return
+			case <-ticker.C:
+				if h.vp8tunnel == nil {
+					return
+				}
+				lastRecv := h.vp8tunnel.LastRecvTime()
+				if lastRecv.IsZero() {
+					continue
+				}
+				if time.Since(lastRecv) > dataWatchdogTimeout {
+					h.logFn("headless: DATA WATCHDOG: no frames for %v, emitting TUNNEL_LOST", time.Since(lastRecv))
+					h.Status.EmitStatus(common.StatusTunnelLost)
+					return
+				}
+			}
+		}
+	}()
 }

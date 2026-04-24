@@ -199,6 +199,9 @@ func ReadTrack(track *webrtc.TrackRemote, tun *tunnel.VP8DataTunnel, logFn func(
 		frameBuf = append(frameBuf, vp8Payload...)
 		if pkt.Marker {
 			recvCount++
+			if tun != nil {
+				tun.TouchRecv()
+			}
 			if recvCount <= 3 || recvCount%25 == 0 {
 				if len(frameBuf) > 0 {
 					logFn("%s: recv frame #%d %d bytes, first=0x%02x", prefix, recvCount, len(frameBuf), frameBuf[0])

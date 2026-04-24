@@ -22,19 +22,37 @@ var vp8Interframe = []byte{
 const DataFrameMarker = 0xFF
 
 type VP8DataTunnel struct {
-	track      *webrtc.TrackLocalStaticSample
-	mu         sync.Mutex
-	logFn      func(string, ...any)
-	frameCount uint64
-	running    bool
-	stopCh     chan struct{}
-	sendQueue  chan []byte
-	OnData     func([]byte)
-	OnClose    func()
+	track        *webrtc.TrackLocalStaticSample
+	mu           sync.Mutex
+	logFn        func(string, ...any)
+	frameCount   uint64
+	running      bool
+	stopCh       chan struct{}
+	sendQueue    chan []byte
+	OnData       func([]byte)
+	OnClose      func()
+	OnRecvFrame  func()
+	lastRecvTime atomic.Int64
 }
 
-func (t *VP8DataTunnel) SetOnData(fn func([]byte))  { t.OnData = fn }
-func (t *VP8DataTunnel) SetOnClose(fn func())        { t.OnClose = fn }
+func (t *VP8DataTunnel) SetOnData(fn func([]byte)) { t.OnData = fn }
+func (t *VP8DataTunnel) SetOnClose(fn func())      { t.OnClose = fn }
+func (t *VP8DataTunnel) SetOnRecvFrame(fn func())  { t.OnRecvFrame = fn }
+
+func (t *VP8DataTunnel) TouchRecv() {
+	t.lastRecvTime.Store(time.Now().UnixNano())
+	if t.OnRecvFrame != nil {
+		t.OnRecvFrame()
+	}
+}
+
+func (t *VP8DataTunnel) LastRecvTime() time.Time {
+	ns := t.lastRecvTime.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
+}
 
 func NewVP8DataTunnel(track *webrtc.TrackLocalStaticSample, logFn func(string, ...any)) *VP8DataTunnel {
 	return &VP8DataTunnel{
