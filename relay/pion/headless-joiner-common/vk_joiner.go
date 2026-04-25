@@ -67,12 +67,19 @@ type VKHeadlessJoiner struct {
 
 	watchdogStop    chan struct{}
 	turnRefreshStop chan struct{}
+	dcHeartbeatStop chan struct{}
+	dcHeartbeatMu   sync.Mutex
 }
 
 // turnRefreshInterval — keep TURN permissions alive (RFC 8656 §3.3 expiry: 5 min).
 // Pion's internal client refreshes at 120s while it has traffic; this loop adds an
 // explicit relay-path heartbeat at 4 min so a quiet relay does not get dropped.
 const turnRefreshInterval = 4 * time.Minute
+
+// dcHeartbeatInterval — push a tiny packet over the DataChannel periodically so
+// the SCTP/relay path is never idle long enough for the TURN allocation to expire
+// (RFC 8656 default lifetime: 10 min). 30s gives plenty of margin.
+const dcHeartbeatInterval = 30 * time.Second
 
 func NewVKHeadlessJoiner(logFn func(string, ...any), resolveFn ResolveFunc, status StatusEmitter, pcConfig PeerConnectionConfigurer, addTracks AddTunnelTracksFunc, readTrackFn ReadTrackFunc) *VKHeadlessJoiner {
 	return &VKHeadlessJoiner{
@@ -108,6 +115,7 @@ func (h *VKHeadlessJoiner) RunWithParams(jsonParams string) {
 func (h *VKHeadlessJoiner) Close() {
 	StopCaptchaProxy()
 	h.stopTURNRefresh()
+	h.stopDCHeartbeat()
 	h.vkMu.Lock()
 	ws := h.vkWs
 	h.vkWs = nil
@@ -175,6 +183,49 @@ func (h *VKHeadlessJoiner) stopTURNRefresh() {
 	if h.turnRefreshStop != nil {
 		close(h.turnRefreshStop)
 		h.turnRefreshStop = nil
+	}
+}
+
+func (h *VKHeadlessJoiner) startDCHeartbeat(dc *webrtc.DataChannel) {
+	h.dcHeartbeatMu.Lock()
+	if h.dcHeartbeatStop != nil {
+		h.dcHeartbeatMu.Unlock()
+		return
+	}
+	stop := make(chan struct{})
+	h.dcHeartbeatStop = stop
+	h.dcHeartbeatMu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(dcHeartbeatInterval)
+		defer ticker.Stop()
+		h.logFn("headless: DC heartbeat loop started (interval=%s)", dcHeartbeatInterval)
+		payload := []byte{0x00}
+		for {
+			select {
+			case <-stop:
+				h.logFn("headless: DC heartbeat loop stopped")
+				return
+			case <-ticker.C:
+				if dc.ReadyState() != webrtc.DataChannelStateOpen {
+					continue
+				}
+				if err := dc.Send(payload); err != nil {
+					h.logFn("headless: DC heartbeat send failed: %v", err)
+					continue
+				}
+				h.logFn("headless: DC heartbeat sent (%d byte) to keep TURN alive", len(payload))
+			}
+		}
+	}()
+}
+
+func (h *VKHeadlessJoiner) stopDCHeartbeat() {
+	h.dcHeartbeatMu.Lock()
+	defer h.dcHeartbeatMu.Unlock()
+	if h.dcHeartbeatStop != nil {
+		close(h.dcHeartbeatStop)
+		h.dcHeartbeatStop = nil
 	}
 }
 
@@ -475,7 +526,11 @@ func (h *VKHeadlessJoiner) initPC() {
 
 	h.logFn("headless: tunnel mode: %s", mode)
 
-	if mode == "video" {
+	// VK SFU requires audio+video tracks in SDP offer to establish the connection,
+	// and continuous media (VP8 keepalive) to avoid kicking us as idle (~14s threshold).
+	// In "dc" mode we still add tracks and run VP8 keepalive, but actual tunnel data
+	// flows through DataChannel (no VP8 encoding overhead, no SFU bitrate cap).
+	if mode == "video" || mode == "dc" {
 		h.sampleTrack = h.AddTracks(pc, h.logFn, "headless")
 	}
 
@@ -492,15 +547,17 @@ func (h *VKHeadlessJoiner) initPC() {
 		dc.OnOpen(func() {
 			h.logFn("headless: tunnel DC open")
 			if mode == "dc" {
-				h.logFn("headless: === DC TUNNEL CONNECTED ===")
+				h.logFn("headless: === DC TUNNEL CONNECTED (hybrid: VP8 keepalive + DC data) ===")
 				h.Status.EmitStatus(common.StatusTunnelConnected)
 				if h.OnConnected != nil {
 					h.OnConnected(tunnel.NewDCTunnel(dc, common.RTPBufSize, h.logFn))
 				}
+				h.startDCHeartbeat(dc)
 			}
 		})
 		dc.OnClose(func() {
 			h.logFn("headless: tunnel DC closed")
+			h.stopDCHeartbeat()
 		})
 	}
 
@@ -522,14 +579,22 @@ func (h *VKHeadlessJoiner) initPC() {
 		if state == webrtc.PeerConnectionStateConnected {
 			h.startTURNRefresh()
 		}
-		if mode == "video" && state == webrtc.PeerConnectionStateConnected && h.vp8tunnel == nil {
-			h.logFn("headless: === TUNNEL CONNECTED ===")
-			h.Status.EmitStatus(common.StatusTunnelConnected)
-			h.vp8tunnel = tunnel.NewVP8DataTunnel(h.sampleTrack, h.logFn)
-			h.vp8tunnel.Start(25)
-			h.startDataWatchdog()
-			if h.OnConnected != nil {
-				h.OnConnected(h.vp8tunnel)
+		if state == webrtc.PeerConnectionStateConnected && h.vp8tunnel == nil && h.sampleTrack != nil {
+			if mode == "video" {
+				h.logFn("headless: === TUNNEL CONNECTED ===")
+				h.Status.EmitStatus(common.StatusTunnelConnected)
+				h.vp8tunnel = tunnel.NewVP8DataTunnel(h.sampleTrack, h.logFn)
+				h.vp8tunnel.Start(25)
+				h.startDataWatchdog()
+				if h.OnConnected != nil {
+					h.OnConnected(h.vp8tunnel)
+				}
+			} else if mode == "dc" {
+				// Hybrid: VP8 keepalive only (no data sent through this tunnel),
+				// real data flows through DataChannel via DCTunnel.
+				h.logFn("headless: starting VP8 keepalive (hybrid mode)")
+				h.vp8tunnel = tunnel.NewVP8DataTunnel(h.sampleTrack, h.logFn)
+				h.vp8tunnel.Start(25)
 			}
 		}
 	})
