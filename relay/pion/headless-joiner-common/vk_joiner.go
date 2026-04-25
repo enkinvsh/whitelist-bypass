@@ -458,9 +458,11 @@ func (h *VKHeadlessJoiner) initPC() {
 	settingEngine := webrtc.SettingEngine{}
 	settingEngine.DisableCloseByDTLS(true)
 	settingEngine.DetachDataChannels()
+	settingEngine.SetICETimeouts(30*time.Second, 60*time.Second, 2*time.Second)
 	if h.PCConfig != nil {
 		h.PCConfig.ConfigureSettingEngine(&settingEngine)
 	}
+	h.logFn("headless: ICE timeouts: disconnected=30s, failed=60s, keepalive=2s")
 
 	pc, err := webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine)).NewPeerConnection(webrtc.Configuration{
 		ICEServers: iceServers,

@@ -29,11 +29,11 @@ const (
 type TelemostHeadlessJoiner struct {
 	logFn       func(string, ...any)
 	OnConnected func(tunnel.DataTunnel)
-	ResolveFn      ResolveFunc
-	Status         StatusEmitter
-	PCConfig       PeerConnectionConfigurer
-	AddTracks      AddTunnelTracksFunc
-	ReadTrackFn    ReadTrackFunc
+	ResolveFn   ResolveFunc
+	Status      StatusEmitter
+	PCConfig    PeerConnectionConfigurer
+	AddTracks   AddTunnelTracksFunc
+	ReadTrackFn ReadTrackFunc
 
 	joinLink    string
 	displayName string
@@ -276,35 +276,35 @@ func (j *TelemostHeadlessJoiner) sendHello() {
 		"hello": map[string]interface{}{
 			"participantMeta":       map[string]interface{}{"name": j.displayName, "role": "SPEAKER", "description": "", "sendAudio": false, "sendVideo": true},
 			"participantAttributes": map[string]interface{}{"name": j.displayName, "role": "SPEAKER", "description": ""},
-			"sendAudio": false, "sendVideo": true, "sendSharing": false,
+			"sendAudio":             false, "sendVideo": true, "sendSharing": false,
 			"participantId": j.peerID, "roomId": j.roomID,
 			"serviceName": j.serviceName, "credentials": j.credentials,
 			"capabilitiesOffer": map[string][]string{
-				"offerAnswerMode":              {"SEPARATE"},
-				"initialSubscriberOffer":       {"ON_HELLO"},
-				"slotsMode":                    {"FROM_CONTROLLER"},
-				"simulcastMode":                {"DISABLED", "STATIC"},
-				"selfVadStatus":                {"FROM_SERVER", "FROM_CLIENT"},
-				"dataChannelSharing":           {"TO_RTP"},
-				"videoEncoderConfig":           {"NO_CONFIG", "ONLY_INIT_CONFIG", "RUNTIME_CONFIG"},
-				"dataChannelVideoCodec":        {"VP8", "UNIQUE_CODEC_FROM_TRACK_DESCRIPTION"},
-				"bandwidthLimitationReason":    {"BANDWIDTH_REASON_DISABLED", "BANDWIDTH_REASON_ENABLED"},
-				"sdkDefaultDeviceManagement":   {"SDK_DEFAULT_DEVICE_MANAGEMENT_DISABLED", "SDK_DEFAULT_DEVICE_MANAGEMENT_ENABLED"},
-				"joinOrderLayout":              {"JOIN_ORDER_LAYOUT_DISABLED", "JOIN_ORDER_LAYOUT_ENABLED"},
-				"pinLayout":                    {"PIN_LAYOUT_DISABLED"},
-				"sendSelfViewVideoSlot":        {"SEND_SELF_VIEW_VIDEO_SLOT_DISABLED", "SEND_SELF_VIEW_VIDEO_SLOT_ENABLED"},
-				"serverLayoutTransition":       {"SERVER_LAYOUT_TRANSITION_DISABLED"},
-				"sdkPublisherOptimizeBitrate":  {"SDK_PUBLISHER_OPTIMIZE_BITRATE_DISABLED", "SDK_PUBLISHER_OPTIMIZE_BITRATE_FULL", "SDK_PUBLISHER_OPTIMIZE_BITRATE_ONLY_SELF"},
-				"sdkNetworkLostDetection":      {"SDK_NETWORK_LOST_DETECTION_DISABLED"},
-				"sdkNetworkPathMonitor":        {"SDK_NETWORK_PATH_MONITOR_DISABLED"},
-				"publisherVp9":                 {"PUBLISH_VP9_DISABLED", "PUBLISH_VP9_ENABLED"},
-				"svcMode":                      {"SVC_MODE_DISABLED", "SVC_MODE_L3T3", "SVC_MODE_L3T3_KEY"},
-				"subscriberOfferAsyncAck":      {"SUBSCRIBER_OFFER_ASYNC_ACK_DISABLED", "SUBSCRIBER_OFFER_ASYNC_ACK_ENABLED"},
-				"subscriberDtlsPassiveMode":    {"SUBSCRIBER_DTLS_PASSIVE_MODE_DISABLED", "SUBSCRIBER_DTLS_PASSIVE_MODE_ENABLED"},
+				"offerAnswerMode":             {"SEPARATE"},
+				"initialSubscriberOffer":      {"ON_HELLO"},
+				"slotsMode":                   {"FROM_CONTROLLER"},
+				"simulcastMode":               {"DISABLED", "STATIC"},
+				"selfVadStatus":               {"FROM_SERVER", "FROM_CLIENT"},
+				"dataChannelSharing":          {"TO_RTP"},
+				"videoEncoderConfig":          {"NO_CONFIG", "ONLY_INIT_CONFIG", "RUNTIME_CONFIG"},
+				"dataChannelVideoCodec":       {"VP8", "UNIQUE_CODEC_FROM_TRACK_DESCRIPTION"},
+				"bandwidthLimitationReason":   {"BANDWIDTH_REASON_DISABLED", "BANDWIDTH_REASON_ENABLED"},
+				"sdkDefaultDeviceManagement":  {"SDK_DEFAULT_DEVICE_MANAGEMENT_DISABLED", "SDK_DEFAULT_DEVICE_MANAGEMENT_ENABLED"},
+				"joinOrderLayout":             {"JOIN_ORDER_LAYOUT_DISABLED", "JOIN_ORDER_LAYOUT_ENABLED"},
+				"pinLayout":                   {"PIN_LAYOUT_DISABLED"},
+				"sendSelfViewVideoSlot":       {"SEND_SELF_VIEW_VIDEO_SLOT_DISABLED", "SEND_SELF_VIEW_VIDEO_SLOT_ENABLED"},
+				"serverLayoutTransition":      {"SERVER_LAYOUT_TRANSITION_DISABLED"},
+				"sdkPublisherOptimizeBitrate": {"SDK_PUBLISHER_OPTIMIZE_BITRATE_DISABLED", "SDK_PUBLISHER_OPTIMIZE_BITRATE_FULL", "SDK_PUBLISHER_OPTIMIZE_BITRATE_ONLY_SELF"},
+				"sdkNetworkLostDetection":     {"SDK_NETWORK_LOST_DETECTION_DISABLED"},
+				"sdkNetworkPathMonitor":       {"SDK_NETWORK_PATH_MONITOR_DISABLED"},
+				"publisherVp9":                {"PUBLISH_VP9_DISABLED", "PUBLISH_VP9_ENABLED"},
+				"svcMode":                     {"SVC_MODE_DISABLED", "SVC_MODE_L3T3", "SVC_MODE_L3T3_KEY"},
+				"subscriberOfferAsyncAck":     {"SUBSCRIBER_OFFER_ASYNC_ACK_DISABLED", "SUBSCRIBER_OFFER_ASYNC_ACK_ENABLED"},
+				"subscriberDtlsPassiveMode":   {"SUBSCRIBER_DTLS_PASSIVE_MODE_DISABLED", "SUBSCRIBER_DTLS_PASSIVE_MODE_ENABLED"},
 			},
 			"sdkInfo":             map[string]interface{}{"implementation": "browser", "version": "5.27.0", "userAgent": common.UserAgent, "hwConcurrency": 8},
 			"sdkInitializationId": uuid.New().String(),
-			"disablePublisher": false, "disableSubscriber": false, "disableSubscriberAudio": false,
+			"disablePublisher":    false, "disableSubscriber": false, "disableSubscriberAudio": false,
 		},
 	})
 	j.logFn("telemost-joiner: -> hello")
@@ -326,9 +326,11 @@ func (j *TelemostHeadlessJoiner) initPC() {
 
 	settingEngine := webrtc.SettingEngine{}
 	settingEngine.DetachDataChannels()
+	settingEngine.SetICETimeouts(30*time.Second, 60*time.Second, 2*time.Second)
 	if j.PCConfig != nil {
 		j.PCConfig.ConfigureSettingEngine(&settingEngine)
 	}
+	j.logFn("telemost-joiner: ICE timeouts: disconnected=30s, failed=60s, keepalive=2s")
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine))
 
 	subPC, err := api.NewPeerConnection(config)

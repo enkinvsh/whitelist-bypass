@@ -82,6 +82,8 @@ func (c *VKClient) createPC(config webrtc.Configuration) error {
 	se := webrtc.SettingEngine{}
 	se.SetNet(&common.AndroidNet{})
 	se.SetInterfaceFilter(func(iface string) bool { return false })
+	se.SetICETimeouts(30*time.Second, 60*time.Second, 2*time.Second)
+	c.logFn("vk: ICE timeouts: disconnected=30s, failed=60s, keepalive=2s")
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
 	pc, err := api.NewPeerConnection(config)
 	if err != nil {

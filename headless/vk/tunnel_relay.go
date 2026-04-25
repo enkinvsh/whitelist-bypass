@@ -54,7 +54,11 @@ func NewTunnelRelay() *TunnelRelay {
 }
 
 func (u *TunnelRelay) Init(iceServers []webrtc.ICEServer) error {
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: iceServers})
+	se := webrtc.SettingEngine{}
+	se.SetICETimeouts(30*time.Second, 60*time.Second, 2*time.Second)
+	log.Printf("[relay] ICE timeouts: disconnected=30s, failed=60s, keepalive=2s")
+	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
+	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: iceServers})
 	if err != nil {
 		return err
 	}

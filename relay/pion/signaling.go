@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/rtp"
@@ -71,6 +72,7 @@ func ParseICEServers(data json.RawMessage) ([]webrtc.ICEServer, error) {
 func NewPionAPI(localIP string) *webrtc.API {
 	se := webrtc.SettingEngine{}
 	se.SetNet(&common.AndroidNet{LocalIP: localIP})
+	se.SetICETimeouts(30*time.Second, 60*time.Second, 2*time.Second)
 	return webrtc.NewAPI(webrtc.WithSettingEngine(se))
 }
 
