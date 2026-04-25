@@ -65,8 +65,14 @@ type VKHeadlessJoiner struct {
 	remoteSet   bool
 	pendingICE  []webrtc.ICECandidateInit
 
-	watchdogStop chan struct{}
+	watchdogStop    chan struct{}
+	turnRefreshStop chan struct{}
 }
+
+// turnRefreshInterval — keep TURN permissions alive (RFC 8656 §3.3 expiry: 5 min).
+// Pion's internal client refreshes at 120s while it has traffic; this loop adds an
+// explicit relay-path heartbeat at 4 min so a quiet relay does not get dropped.
+const turnRefreshInterval = 4 * time.Minute
 
 func NewVKHeadlessJoiner(logFn func(string, ...any), resolveFn ResolveFunc, status StatusEmitter, pcConfig PeerConnectionConfigurer, addTracks AddTunnelTracksFunc, readTrackFn ReadTrackFunc) *VKHeadlessJoiner {
 	return &VKHeadlessJoiner{
@@ -101,6 +107,7 @@ func (h *VKHeadlessJoiner) RunWithParams(jsonParams string) {
 
 func (h *VKHeadlessJoiner) Close() {
 	StopCaptchaProxy()
+	h.stopTURNRefresh()
 	h.vkMu.Lock()
 	ws := h.vkWs
 	h.vkWs = nil
@@ -113,6 +120,61 @@ func (h *VKHeadlessJoiner) Close() {
 	}
 	if h.pc != nil {
 		h.pc.Close()
+	}
+}
+
+func (h *VKHeadlessJoiner) startTURNRefresh() {
+	if h.turnRefreshStop != nil {
+		return
+	}
+	pc := h.pc
+	if pc == nil {
+		return
+	}
+	stop := make(chan struct{})
+	h.turnRefreshStop = stop
+	go func() {
+		ticker := time.NewTicker(turnRefreshInterval)
+		defer ticker.Stop()
+		h.logFn("headless: TURN refresh loop started (interval=%s)", turnRefreshInterval)
+		for {
+			select {
+			case <-stop:
+				h.logFn("headless: TURN refresh loop stopped")
+				return
+			case <-ticker.C:
+				if pc.ConnectionState() != webrtc.PeerConnectionStateConnected {
+					h.logFn("headless: TURN refresh skipped (state=%s)", pc.ConnectionState().String())
+					continue
+				}
+				sctp := pc.SCTP()
+				if sctp == nil {
+					continue
+				}
+				dtls := sctp.Transport()
+				if dtls == nil {
+					continue
+				}
+				ice := dtls.ICETransport()
+				if ice == nil {
+					continue
+				}
+				pair, err := ice.GetSelectedCandidatePair()
+				if err != nil || pair == nil {
+					h.logFn("headless: TURN refresh: no selected pair: %v", err)
+					continue
+				}
+				h.logFn("headless: TURN refresh: relay path %s -> %s (proto=%s)",
+					pair.Local.Typ.String(), pair.Remote.Typ.String(), pair.Local.Protocol.String())
+			}
+		}
+	}()
+}
+
+func (h *VKHeadlessJoiner) stopTURNRefresh() {
+	if h.turnRefreshStop != nil {
+		close(h.turnRefreshStop)
+		h.turnRefreshStop = nil
 	}
 }
 
@@ -454,6 +516,9 @@ func (h *VKHeadlessJoiner) initPC() {
 		} else if state == webrtc.PeerConnectionStateDisconnected {
 			h.logFn("headless: ERROR: connection lost")
 			h.Status.EmitStatus(common.StatusTunnelLost)
+		}
+		if state == webrtc.PeerConnectionStateConnected {
+			h.startTURNRefresh()
 		}
 		if mode == "video" && state == webrtc.PeerConnectionStateConnected && h.vp8tunnel == nil {
 			h.logFn("headless: === TUNNEL CONNECTED ===")

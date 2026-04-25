@@ -4,11 +4,19 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 	"whitelist-bypass/relay/common"
 	"whitelist-bypass/relay/tunnel"
 )
+
+// turnRefreshInterval — how often to exercise the relay path to keep TURN
+// permissions alive. RFC 8656 §3.3: TURN permissions expire after 5 minutes
+// of inactivity. We refresh every 4 minutes to stay comfortably under that
+// limit. Pion's internal TURN client also refreshes at 120s, but only while
+// it has traffic; a quiet relay may still expire on the server side.
+const turnRefreshInterval = 4 * time.Minute
 
 type VKClient struct {
 	WSHelper
@@ -21,6 +29,7 @@ type VKClient struct {
 	OnConnected     func(tunnel.DataTunnel)
 	dcProducerNotif *webrtc.DataChannel
 	dcProducerCmd   *webrtc.DataChannel
+	turnRefreshStop chan struct{}
 }
 
 func NewVKClient(logFn func(string, ...any)) *VKClient {
@@ -142,6 +151,7 @@ func (c *VKClient) createPC(config webrtc.Configuration) error {
 			c.logFn("vk: PC senders=%d receivers=%d signalingState=%s", len(pc.GetSenders()), len(pc.GetReceivers()), pc.SignalingState().String())
 			c.vp8tunnel = tunnel.NewVP8DataTunnel(sampleTrack, c.logFn)
 			c.vp8tunnel.Start(25)
+			c.startTURNRefresh(pc)
 			if c.OnConnected != nil {
 				c.OnConnected(c.vp8tunnel)
 			}
@@ -296,8 +306,63 @@ func (c *VKClient) readTrack(track *webrtc.TrackRemote) {
 	ReadTrack(track, c.vp8tunnel, c.logFn, "vk")
 }
 
+func (c *VKClient) startTURNRefresh(pc *webrtc.PeerConnection) {
+	if c.turnRefreshStop != nil {
+		return
+	}
+	stop := make(chan struct{})
+	c.turnRefreshStop = stop
+	go func() {
+		ticker := time.NewTicker(turnRefreshInterval)
+		defer ticker.Stop()
+		c.logFn("vk: TURN refresh loop started (interval=%s)", turnRefreshInterval)
+		for {
+			select {
+			case <-stop:
+				c.logFn("vk: TURN refresh loop stopped")
+				return
+			case <-ticker.C:
+				if pc.ConnectionState() != webrtc.PeerConnectionStateConnected {
+					c.logFn("vk: TURN refresh skipped (state=%s)", pc.ConnectionState().String())
+					continue
+				}
+				sctp := pc.SCTP()
+				if sctp == nil {
+					c.logFn("vk: TURN refresh: no SCTP transport")
+					continue
+				}
+				dtls := sctp.Transport()
+				if dtls == nil {
+					c.logFn("vk: TURN refresh: no DTLS transport")
+					continue
+				}
+				ice := dtls.ICETransport()
+				if ice == nil {
+					c.logFn("vk: TURN refresh: no ICE transport")
+					continue
+				}
+				pair, err := ice.GetSelectedCandidatePair()
+				if err != nil || pair == nil {
+					c.logFn("vk: TURN refresh: no selected pair: %v", err)
+					continue
+				}
+				c.logFn("vk: TURN refresh: relay path %s -> %s (local=%s)",
+					pair.Local.Typ.String(), pair.Remote.Typ.String(), pair.Local.Protocol.String())
+			}
+		}
+	}()
+}
+
+func (c *VKClient) stopTURNRefresh() {
+	if c.turnRefreshStop != nil {
+		close(c.turnRefreshStop)
+		c.turnRefreshStop = nil
+	}
+}
+
 func (c *VKClient) handleReset(id int) {
 	c.logFn("vk: reset - closing PC for reconnection")
+	c.stopTURNRefresh()
 	if c.vp8tunnel != nil {
 		c.vp8tunnel.Stop()
 		c.vp8tunnel = nil
@@ -342,6 +407,7 @@ func splitLines(s string) []string {
 }
 
 func (c *VKClient) cleanup() {
+	c.stopTURNRefresh()
 	if c.vp8tunnel != nil {
 		c.vp8tunnel.Stop()
 		c.vp8tunnel = nil

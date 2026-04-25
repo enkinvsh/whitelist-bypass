@@ -20,6 +20,11 @@ type dcConn struct {
 	ch   chan []byte
 }
 
+// turnRefreshInterval — keep TURN permissions alive (RFC 8656 §3.3 expiry: 5 min).
+// Pion's internal TURN client refreshes only while traffic flows; a quiet relay
+// can still expire on the server side. We refresh every 4 minutes.
+const turnRefreshInterval = 4 * time.Minute
+
 type TunnelRelay struct {
 	pc          *webrtc.PeerConnection
 	remoteSet   bool
@@ -40,6 +45,8 @@ type TunnelRelay struct {
 
 	mode     string
 	modeOnce sync.Once
+
+	turnRefreshStop chan struct{}
 }
 
 func NewTunnelRelay() *TunnelRelay {
@@ -123,6 +130,9 @@ func (u *TunnelRelay) Init(iceServers []webrtc.ICEServer) error {
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		log.Printf("[relay] connection state: %s (mode=%s)", state.String(), u.mode)
+		if state == webrtc.PeerConnectionStateConnected {
+			u.startTURNRefresh(pc)
+		}
 		if u.externalCSC != nil {
 			u.externalCSC(state)
 		}
@@ -194,6 +204,7 @@ func (u *TunnelRelay) OnConnectionStateChange(fn func(webrtc.PeerConnectionState
 }
 
 func (u *TunnelRelay) Close() {
+	u.stopTURNRefresh()
 	u.closeAllConns()
 	if u.tun != nil {
 		u.tun.Stop()
@@ -343,6 +354,60 @@ func (u *TunnelRelay) handleUDP(connID uint32, payload []byte) {
 		return
 	}
 	u.sendDCFrame(connID, tunnel.MsgUDPReply, resp[:n])
+}
+
+func (u *TunnelRelay) startTURNRefresh(pc *webrtc.PeerConnection) {
+	if u.turnRefreshStop != nil {
+		return
+	}
+	stop := make(chan struct{})
+	u.turnRefreshStop = stop
+	go func() {
+		ticker := time.NewTicker(turnRefreshInterval)
+		defer ticker.Stop()
+		log.Printf("[relay] TURN refresh loop started (interval=%s)", turnRefreshInterval)
+		for {
+			select {
+			case <-stop:
+				log.Printf("[relay] TURN refresh loop stopped")
+				return
+			case <-ticker.C:
+				if pc.ConnectionState() != webrtc.PeerConnectionStateConnected {
+					log.Printf("[relay] TURN refresh skipped (state=%s)", pc.ConnectionState().String())
+					continue
+				}
+				sctp := pc.SCTP()
+				if sctp == nil {
+					log.Printf("[relay] TURN refresh: no SCTP transport")
+					continue
+				}
+				dtls := sctp.Transport()
+				if dtls == nil {
+					log.Printf("[relay] TURN refresh: no DTLS transport")
+					continue
+				}
+				ice := dtls.ICETransport()
+				if ice == nil {
+					log.Printf("[relay] TURN refresh: no ICE transport")
+					continue
+				}
+				pair, err := ice.GetSelectedCandidatePair()
+				if err != nil || pair == nil {
+					log.Printf("[relay] TURN refresh: no selected pair: %v", err)
+					continue
+				}
+				log.Printf("[relay] TURN refresh: relay path %s -> %s (proto=%s)",
+					pair.Local.Typ.String(), pair.Remote.Typ.String(), pair.Local.Protocol.String())
+			}
+		}
+	}()
+}
+
+func (u *TunnelRelay) stopTURNRefresh() {
+	if u.turnRefreshStop != nil {
+		close(u.turnRefreshStop)
+		u.turnRefreshStop = nil
+	}
 }
 
 func (u *TunnelRelay) closeAllConns() {
